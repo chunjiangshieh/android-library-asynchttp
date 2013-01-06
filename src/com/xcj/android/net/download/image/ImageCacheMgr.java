@@ -17,9 +17,11 @@ import com.xcj.android.net.HttpThread;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
+import android.util.Log;
 
 
 /**
@@ -28,22 +30,23 @@ import android.os.Message;
  * 可以继承该类 定义自己要缓存图片的文件夹位置等
  * @author chunjiang.shieh
  */
-public class ImageCacheMgr {
+public abstract class ImageCacheMgr {
 
+	private static final String TAG = ImageCacheMgr.class.getSimpleName();
 	
 	private Context mContext;
 	
 	/**
 	 * 内存最大缓存数
 	 */
-	private static final int MAX_CACHE_SIZE = 30;
+//	private static final int MAX_CACHE_SIZE = 30;
 	
 	/**
 	 * 缓存图片的默认文件夹
 	 */
 	private static final String FOLDER = "/cache";
 	
-	
+	private static final String SDCARD_IMAGE_PATH = "/.ImageCache";
 	
 	
 	/**
@@ -91,6 +94,11 @@ public class ImageCacheMgr {
 	 */
 	private HttpThread mHttpThread;
 	
+	
+	/**
+	 * 图片是否需要下载到SDCard的标志位
+	 */
+	private static final boolean DOWNLOAD_SDCARD = true;
 
 	public ImageCacheMgr(Context context) {
 		mContext = context;
@@ -124,8 +132,10 @@ public class ImageCacheMgr {
 			} else {
 				Bitmap fileCache = getImageFormFile(url,folder);
 				if (fileCache != null) {
-					//找到文件缓存后先存到内存缓存，以供下次直接从内存缓存中读取
-					fileCache = addImageToCache(url, fileCache);
+					if(getMaxCacheSize()>0){
+						//找到文件缓存后先存到内存缓存，以供下次直接从内存缓存中读取
+						fileCache = addImageToCache(url, fileCache);
+					}
 					return fileCache;
 				}
 			}
@@ -143,15 +153,17 @@ public class ImageCacheMgr {
 	private Bitmap getImageFormFile(String url,String folder) {
 		int endSpritIndex = url.lastIndexOf("/") + 1;
 		String filename = url.substring(endSpritIndex);
-		
+//		Log.d(TAG, "getImageFormFile fileName："+filename);
 		File file = getCacheDir(folder);
+//		Log.d(TAG, "getImageFormFile fileDir："+file.getPath());
 		if (file != null) {
 			file = new File(file, filename);
 			if (file.exists()) {
-//				return BitmapFactory.decodeFile(file.getPath());
-				BitmapFactory.Options options = new BitmapFactory.Options();
-				options.inSampleSize = 2 ; //图片缩小到原来的1/2
-				return BitmapFactory.decodeFile(file.getPath(),options);  //更省内存 
+//				Log.d(TAG, "getImageFormFile file.getPath()："+file.getPath());
+				return BitmapFactory.decodeFile(file.getPath());
+//				BitmapFactory.Options options = new BitmapFactory.Options();
+//				options.inSampleSize = 2 ; //图片缩小到原来的1/2
+//				return BitmapFactory.decodeFile(file.getPath(),options);  //更省内存 
 			}
 		}
 		return null;
@@ -167,7 +179,7 @@ public class ImageCacheMgr {
 		Hashtable<String, Bitmap> table = getCacheTable();
 		List<String> urlList = getCacheURLList();
 		synchronized (table) {
-			if (table.size() > MAX_CACHE_SIZE) { // 大于缓存数. 腾空一个位置
+			if (table.size() > getMaxCacheSize()) { // 大于缓存数. 腾空一个位置
 				String oldURL = urlList.get(0);
 				//注释的代码可能还有点问题，在找更好的解决办法
 //				Bitmap oldBitmap = table.remove(oldURL);
@@ -190,7 +202,7 @@ public class ImageCacheMgr {
 	 * @param saveFolder
 	 * @param callback
 	 */
-	public void doDownloadImage(String url, ImageCallBack callback) {
+	protected void doDownloadImage(String url, ImageCallBack callback) {
 		doDownloadImage(url,FOLDER,callback);
 	}
 	
@@ -200,7 +212,7 @@ public class ImageCacheMgr {
 	 * @param url
 	 * @param callback
 	 */
-	public void doDownloadImage(String url,String saveFolder, ImageCallBack callback) {
+	protected void doDownloadImage(String url,String saveFolder, ImageCallBack callback) {
 
 		if (!url.startsWith("http://")) {
 			url = "http://" + url;
@@ -269,7 +281,19 @@ public class ImageCacheMgr {
 	 * @return
 	 */
 	protected File getCacheDir(String folderStr) {
-		File folder =  mContext.getCacheDir();
+		File folder = null;
+		if(DOWNLOAD_SDCARD){
+			if(Environment.getExternalStorageState().equals(Environment.MEDIA_MOUNTED)){
+				File storage = Environment.getExternalStorageDirectory();
+				String sdcardImagePath = (getSdcardImagePath() ==null
+						|| getSdcardImagePath().equals(""))?SDCARD_IMAGE_PATH:getSdcardImagePath();
+				folder = new File(storage,sdcardImagePath);
+			}else{
+				folder = mContext.getCacheDir();
+			}
+		}else{
+			folder = mContext.getCacheDir();
+		}
 		if(folderStr == null || folderStr.length() <= 0){
 			return null;
 		}else{
@@ -290,34 +314,45 @@ public class ImageCacheMgr {
 	static final int DOWNLOAD_SUCCEED = 0x0;
 	// 下载失败
 	static final int DOWNLOAD_FAIL = 0x1;
+	//下载进度
+	static final int UPDATE_PROGRESS = 0x2;
 	
 	private Handler getDownloadHandler(){
 		if(mDownloadHandler == null){
 			mDownloadHandler = new Handler(Looper.getMainLooper()){
 				
 				public void handleMessage(Message msg) {
-					String url = (String) msg.obj;
+					int code = msg.what;
 					List<ImageCallBack> callbacks = null;
+					String url = (String) msg.obj;
 					synchronized (mDownloadCallBackMap) {
 						callbacks = mDownloadCallBackMap.get(url);
 						//请求完成之后，将该url的回调列表从缓存中移除
-						mDownloadCallBackMap.remove(url);
+						if(code == DOWNLOAD_SUCCEED
+								|| code ==DOWNLOAD_FAIL){
+							mDownloadCallBackMap.remove(url);
+						}
 					}
+				
 					if (callbacks != null && callbacks.size() > 0) {
-						int code = msg.what;
 						if (code == DOWNLOAD_SUCCEED) {
 							Bitmap bitmap = getCacheTable().get(url);
-							
 							for (int i = 0; i < callbacks.size(); i++) {
 								ImageCallBack cb = callbacks.get(i);
 								if (cb != null) {
 									cb.onGetImage(bitmap, url);
 								}
 							}
-						} else {
+						} else if(code == DOWNLOAD_FAIL){
 							for (int i = 0; i < callbacks.size(); i++) {
 								ImageCallBack cb = callbacks.get(i);
 								cb.onGetError(url);
+							}
+						}else if(code == UPDATE_PROGRESS){   //更新进度
+							int progress =  msg.arg1;
+							for (int i = 0; i < callbacks.size(); i++) {
+								ImageCallBack cb = callbacks.get(i);
+								cb.onUpdateProgress(url,progress);
 							}
 						}
 					}
@@ -340,36 +375,48 @@ public class ImageCacheMgr {
 			if (url != null) {
 				String folder = mFolderCache.get(url);
 				mRequestURLMap.remove(requestId);
-				String filename = url.substring(url.lastIndexOf("/")+1, url.lastIndexOf("."));
-				
+//				String filename = url.substring(url.lastIndexOf("/")+1, url.lastIndexOf("."));
+				String filename = url.substring(url.lastIndexOf("/")+1);
+			
 				File dir = getCacheDir(folder);
+//				Log.d(TAG, "------->filename:"+filename 
+//						+" folder:"+folder
+//						+" dir: "+dir.getAbsolutePath());
 			//	File dir = new File(mStoreDir);
-				File tmpFile = new File(dir, filename + ".png.tmp");
+				File tmpFile = new File(dir, filename + ".tmp");
 				if (tmpFile.exists()) {
 					tmpFile.delete();
 				}
 
 				try {
 					FileOutputStream fos = new FileOutputStream(tmpFile);
-					byte[] buf = new byte[1024];
+					byte[] buf = new byte[2048];
 					int num = -1;
+					int count = 0;
 					while ((num = stream.read(buf)) != -1) {
+						count += num;
+						int progress =(int)(((float)count / contentLength) * 100);  
+//						Log.d(TAG, "------------------------->progress:"+progress);
+						Handler handler = getDownloadHandler();
+						Message msg = handler.obtainMessage(UPDATE_PROGRESS, 
+								progress, 0, url);
+						handler.sendMessage(msg);
 						fos.write(buf, 0, num);
-						fos.flush();
 					}
+					fos.flush();
 					fos.close();
 
-					File file = new File(dir, filename + ".png");
+					File file = new File(dir, filename);
 					if (file.exists()) {
 						file.delete();
 					}
 					tmpFile.renameTo(file);
 				
-//					Bitmap bitmap = BitmapFactory.decodeFile(file.getPath());
+					Bitmap bitmap = BitmapFactory.decodeFile(file.getPath());
 					
-					BitmapFactory.Options options = new BitmapFactory.Options();
-					options.inSampleSize = 2 ; //图片缩小到原来的1/2
-					Bitmap bitmap = BitmapFactory.decodeFile(file.getPath(),options);  //更省内存 
+//					BitmapFactory.Options options = new BitmapFactory.Options();
+//					options.inSampleSize = 2 ; //图片缩小到原来的1/2
+//					Bitmap bitmap = BitmapFactory.decodeFile(file.getPath(),options);  //更省内存 
 					/**
 					 * 添加图片到缓存
 					 */
@@ -379,6 +426,7 @@ public class ImageCacheMgr {
 					handler.sendMessage(msg);
 				} catch (IOException e) {
 					// TODO: handle exception
+					e.printStackTrace();
 					Handler handler = getDownloadHandler();
 					Message msg = handler.obtainMessage(DOWNLOAD_FAIL,url);
 					handler.sendMessage(msg);
@@ -451,6 +499,21 @@ public class ImageCacheMgr {
 		 * @param localPath
 		 */
 		public void onGetError(String url);
+		
+		/**
+		 * 更新下载进度
+		 */
+		public void onUpdateProgress(String url,int progress);
 	} 
 	
+	/**
+	 * return 0 表示不需要缓存
+	 * @return
+	 */
+	public abstract int getMaxCacheSize();
+	/**
+	 * 保存图片到sdcard的路径
+	 * @return
+	 */
+	public abstract String getSdcardImagePath();
 }
